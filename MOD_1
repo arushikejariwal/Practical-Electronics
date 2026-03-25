@@ -1,0 +1,281 @@
+from gpiozero import Servo, Button
+from time import sleep, time
+import re
+
+# =========================================
+# HARDWARE CONFIGURATION
+# =========================================
+SERVO_GPIO = 18
+HOME_SWITCH_GPIO = 23
+
+servo = Servo(
+    SERVO_GPIO,
+    min_pulse_width=0.0007,
+    max_pulse_width=0.0023
+)
+
+home_switch = Button(HOME_SWITCH_GPIO, pull_up=True, bounce_time=0.02)
+
+# =========================================
+# CALIBRATION
+# =========================================
+# Change these after testing your real mechanism
+UP_SPEED = 0.25
+DOWN_SPEED = -0.25
+STOP = 0.0
+
+SECONDS_PER_MM = 0.35   # MUST be calibrated on your real piston setup
+
+# Valid motion limits
+MIN_TRAVEL_MM = 0
+MAX_TRAVEL_MM = 120     # 10 ft = 120 inches = 120 mm
+STEP_MM = 6             # 6 inch increments = 6 mm piston travel
+
+HOME_TIMEOUT_SEC = 15
+
+# =========================================
+# MOTOR CONTROL
+# =========================================
+def motor_up():
+    servo.value = UP_SPEED
+
+def motor_down():
+    servo.value = DOWN_SPEED
+
+def motor_stop():
+    servo.value = STOP
+    sleep(0.2)
+
+# =========================================
+# HOMING
+# =========================================
+def home_piston():
+    """
+    Move piston down until the home switch is pressed.
+    Home = 0 level.
+    """
+    print("Homing to 0 level...")
+
+    if home_switch.is_pressed:
+        motor_stop()
+        print("Already at home.")
+        return
+
+    motor_down()
+    start = time()
+
+    while not home_switch.is_pressed:
+        if time() - start > HOME_TIMEOUT_SEC:
+            motor_stop()
+            raise TimeoutError("Homing failed: home switch not reached.")
+        sleep(0.01)
+
+    motor_stop()
+    print("Home reached.")
+
+# =========================================
+# MOVE FROM HOME
+# =========================================
+def move_up_mm(distance_mm: int):
+    """
+    Move upward from home by a validated distance in mm.
+    """
+    if distance_mm < MIN_TRAVEL_MM or distance_mm > MAX_TRAVEL_MM:
+        raise ValueError("Target distance out of allowed range.")
+
+    if distance_mm % STEP_MM != 0:
+        raise ValueError("Target distance must be in 6 mm increments.")
+
+    if distance_mm == 0:
+        print("Target is 0 level. Staying at home.")
+        return
+
+    move_time = distance_mm * SECONDS_PER_MM
+    print(f"Moving up to {distance_mm} mm...")
+    motor_up()
+    sleep(move_time)
+    motor_stop()
+    print("Move complete.")
+
+# =========================================
+# INPUT PARSING + VALIDATION
+# =========================================
+def parse_level_to_mm(user_text: str) -> int:
+    """
+    Accepts ONLY:
+      0
+      6 inches
+      1 foot
+      1 foot 6 inches
+      2 feet
+      ...
+      10 feet
+
+    Rejects:
+      1.2
+      7 inches
+      2 foot 4 inches
+      10 foot 6 inches
+      negative values
+      anything not in 6-inch increments
+
+    Since 1 inch input = 1 mm piston motion:
+      total inches = total mm travel
+    """
+    text = user_text.strip().lower()
+
+    # Reject decimals immediately
+    if re.search(r'\d+\.\d+', text):
+        raise ValueError("Invalid input: decimals are not allowed.")
+
+    # Normalize wording
+    text = text.replace('"', ' inches ')
+    text = text.replace("'", ' feet ')
+    text = text.replace("ft.", "ft")
+    text = text.replace("in.", "in")
+    text = text.replace("feet", "foot")
+    text = text.replace("inches", "inch")
+
+    text = " ".join(text.split())
+
+    # Special case: 0
+    if text == "0":
+        return 0
+
+    # Allowed patterns only:
+    #   X foot
+    #   X foot Y inch
+    #   Y inch
+    patterns = [
+        r'^(\d+)\s*(foot|ft)$',
+        r'^(\d+)\s*(foot|ft)\s+(\d+)\s*(inch|in)$',
+        r'^(\d+)\s*(inch|in)$'
+    ]
+
+    match = None
+    matched_pattern = None
+    for p in patterns:
+        m = re.match(p, text)
+        if m:
+            match = m
+            matched_pattern = p
+            break
+
+    if not match:
+        raise ValueError(
+            "Invalid input format. Use only values like: 0, 6 inches, 1 foot, 1 foot 6 inches."
+        )
+
+    feet = 0
+    inches = 0
+
+    if matched_pattern == patterns[0]:
+        feet = int(match.group(1))
+
+    elif matched_pattern == patterns[1]:
+        feet = int(match.group(1))
+        inches = int(match.group(3))
+
+    elif matched_pattern == patterns[2]:
+        inches = int(match.group(1))
+
+    total_inches = feet * 12 + inches
+
+    # Validation rules
+    if total_inches < 0:
+        raise ValueError("Negative values are not allowed.")
+
+    if total_inches > 120:
+        raise ValueError("Maximum allowed level is 10 feet.")
+
+    if total_inches % 6 != 0:
+        raise ValueError("Input must be in 6-inch increments only.")
+
+    return total_inches  # 1 inch input = 1 mm movement
+
+# =========================================
+# HIGH-LEVEL COMMAND
+# =========================================
+def go_to_level(level_text: str):
+    """
+    Every new command:
+    1. Home to 0 level
+    2. Move up to requested valid level
+    """
+    target_mm = parse_level_to_mm(level_text)
+
+    print(f"\nRequested level: {level_text}")
+    print(f"Validated target: {target_mm} mm")
+
+    home_piston()
+    move_up_mm(target_mm)
+
+# =========================================
+# OPTIONAL: DISPLAY VALID LEVELS
+# =========================================
+def print_valid_levels():
+    print("Valid inputs are only:")
+    valid = []
+    for inches in range(0, 121, 6):
+        if inches == 0:
+            valid.append("0")
+        elif inches < 12:
+            valid.append(f"{inches} inches")
+        else:
+            feet = inches // 12
+            rem = inches % 12
+            if rem == 0:
+                if feet == 1:
+                    valid.append("1 foot")
+                else:
+                    valid.append(f"{feet} feet")
+            else:
+                if feet == 1:
+                    valid.append(f"1 foot {rem} inches")
+                else:
+                    valid.append(f"{feet} feet {rem} inches")
+
+    for v in valid:
+        print(f"  {v}")
+
+# =========================================
+# MAIN LOOP
+# =========================================
+def main():
+    print("Piston Level Controller")
+    print("Allowed range: 0 to 10 feet")
+    print("Allowed step size: 6 inches only")
+    print("Examples:")
+    print("  0")
+    print("  6 inches")
+    print("  1 foot")
+    print("  1 foot 6 inches")
+    print("  2 feet")
+    print("  10 feet")
+    print("Type 'list' to see all valid inputs.")
+    print("Type 'quit' to exit.\n")
+
+    try:
+        home_piston()
+
+        while True:
+            user_input = input("\nEnter target level: ").strip()
+
+            if user_input.lower() in ("quit", "exit", "q"):
+                break
+
+            if user_input.lower() == "list":
+                print_valid_levels()
+                continue
+
+            try:
+                go_to_level(user_input)
+            except Exception as e:
+                print(f"Error: {e}")
+
+    finally:
+        motor_stop()
+        print("Servo stopped.")
+
+if __name__ == "__main__":
+    main()
