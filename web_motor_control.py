@@ -33,13 +33,16 @@ last_message = "System ready."
 
 # =========================================
 # MOTOR CLASS
+# direction = +1 means normal
+# direction = -1 means reversed
 # =========================================
 class StepperMotor:
-    def __init__(self, name, pins):
+    def __init__(self, name, pins, direction=1):
         self.name = name
         self.outputs = [OutputDevice(pin) for pin in pins]
         self.current_level = 0.0
         self.step_index = 0
+        self.direction = direction
 
     def apply_state(self, state):
         for out, value in zip(self.outputs, state):
@@ -48,11 +51,17 @@ class StepperMotor:
             else:
                 out.off()
 
-    def step_one(self, direction):
-        if direction > 0:
+    def step_one(self, logical_direction):
+        # logical_direction:
+        #   +1 = move toward target
+        #   -1 = move back to zero
+        actual_direction = logical_direction * self.direction
+
+        if actual_direction > 0:
             self.step_index = (self.step_index + 1) % len(HALF_STEP_SEQ)
         else:
             self.step_index = (self.step_index - 1) % len(HALF_STEP_SEQ)
+
         self.apply_state(HALF_STEP_SEQ[self.step_index])
 
     def release(self):
@@ -62,12 +71,14 @@ class StepperMotor:
 
 # =========================================
 # MOTOR SETUP
+# A is correct as-is
+# B, C, D are reversed
 # =========================================
 motors = {
-    "A": StepperMotor("A", [17, 27, 22, 23]),
-    "B": StepperMotor("B", [24, 25, 5, 6]),
-    "C": StepperMotor("C", [12, 13, 16, 20]),
-    "D": StepperMotor("D", [21, 26, 19, 18]),
+    "A": StepperMotor("A", [17, 27, 22, 23], direction=1),
+    "B": StepperMotor("B", [24, 25, 5, 6], direction=-1),
+    "C": StepperMotor("C", [12, 13, 16, 20], direction=-1),
+    "D": StepperMotor("D", [21, 26, 19, 18], direction=-1),
 }
 
 
@@ -146,7 +157,7 @@ def get_status_data():
 # =========================================
 # LOW-LEVEL STEPPING
 # =========================================
-def run_group_steps(step_plan, direction):
+def run_group_steps(step_plan, logical_direction):
     remaining = dict(step_plan)
     if not remaining:
         return
@@ -154,7 +165,7 @@ def run_group_steps(step_plan, direction):
     while any(steps > 0 for steps in remaining.values()):
         for motor, steps_left in remaining.items():
             if steps_left > 0:
-                motor.step_one(direction)
+                motor.step_one(logical_direction)
                 remaining[motor] -= 1
         sleep(STEP_DELAY)
 
@@ -176,7 +187,7 @@ def move_single_motor_to_zero(name):
     reverse_steps = mm_to_steps(reverse_mm)
 
     step_plan = {motor: reverse_steps}
-    run_group_steps(step_plan, direction=-1)
+    run_group_steps(step_plan, logical_direction=-1)
 
     motor.current_level = 0.0
     motor.release()
@@ -190,7 +201,7 @@ def move_single_motor_to_target(name, target_level):
 
     if target_steps > 0:
         step_plan = {motor: target_steps}
-        run_group_steps(step_plan, direction=1)
+        run_group_steps(step_plan, logical_direction=1)
 
     motor.current_level = target_level
     motor.release()
