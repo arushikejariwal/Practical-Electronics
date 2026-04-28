@@ -12,8 +12,6 @@ app = Flask(__name__)
 # =========================================
 STEP_DELAY = 0.002
 STEPS_PER_MM = 64   # calibrate for your mechanism
-MIN_LEVEL = 0.0
-MAX_LEVEL = 10.0
 CONFIG_FILE = "motor_configs.json"
 
 HALF_STEP_SEQ = [
@@ -132,8 +130,8 @@ def validate_level(level):
 
 
 def release_all():
-    for m in motors.values():
-        m.release()
+    for motor in motors.values():
+        motor.release()
 
 
 def get_status_data():
@@ -146,7 +144,7 @@ def get_status_data():
 
 
 # =========================================
-# MOTOR MOTION
+# LOW-LEVEL STEPPING
 # =========================================
 def run_group_steps(step_plan, direction):
     remaining = dict(step_plan)
@@ -164,37 +162,50 @@ def run_group_steps(step_plan, direction):
         motor.release()
 
 
+# =========================================
+# SEQUENTIAL MOTOR MOTION
+# Group commands run A -> B -> C -> D
+# =========================================
+def move_single_motor_to_zero(name):
+    motor = motors[name]
+
+    if motor.current_level <= 0:
+        return
+
+    reverse_mm = level_to_mm(motor.current_level)
+    reverse_steps = mm_to_steps(reverse_mm)
+
+    step_plan = {motor: reverse_steps}
+    run_group_steps(step_plan, direction=-1)
+
+    motor.current_level = 0.0
+    motor.release()
+
+
+def move_single_motor_to_target(name, target_level):
+    motor = motors[name]
+
+    target_mm = level_to_mm(target_level)
+    target_steps = mm_to_steps(target_mm)
+
+    if target_steps > 0:
+        step_plan = {motor: target_steps}
+        run_group_steps(step_plan, direction=1)
+
+    motor.current_level = target_level
+    motor.release()
+
+
 def home_selected(selected_names):
-    reverse_plan = {}
-
-    for name in selected_names:
-        motor = motors[name]
-        if motor.current_level > 0:
-            reverse_mm = level_to_mm(motor.current_level)
-            reverse_steps = mm_to_steps(reverse_mm)
-            reverse_plan[motor] = reverse_steps
-
-    run_group_steps(reverse_plan, direction=-1)
-
-    for name in selected_names:
-        motors[name].current_level = 0.0
+    ordered_names = [name for name in ["A", "B", "C", "D"] if name in selected_names]
+    for name in ordered_names:
+        move_single_motor_to_zero(name)
 
 
 def move_selected_to_targets(targets):
-    forward_plan = {}
-
-    for name, target_level in targets.items():
-        motor = motors[name]
-        target_mm = level_to_mm(target_level)
-        target_steps = mm_to_steps(target_mm)
-
-        if target_steps > 0:
-            forward_plan[motor] = target_steps
-
-    run_group_steps(forward_plan, direction=1)
-
-    for name, target_level in targets.items():
-        motors[name].current_level = target_level
+    ordered_names = [name for name in ["A", "B", "C", "D"] if name in targets]
+    for name in ordered_names:
+        move_single_motor_to_target(name, targets[name])
 
 
 def execute_targets(targets):
@@ -514,7 +525,7 @@ PAGE = """
       <button class="warn" type="submit">Safe Quit</button>
     </form>
     <p class="footer-note">
-      Standby is logical only in this version. It blocks movement commands but does not actively hold torque.
+      Group commands run sequentially in this version: A → B → C → D.
     </p>
   </div>
 </div>
@@ -548,8 +559,14 @@ def run():
         targets = build_targets_from_form(request.form)
         if not targets:
             raise ValueError("Select at least one motor.")
+
         execute_targets(targets)
-        set_message(f"Ran motors: {targets}")
+
+        if len(targets) > 1:
+            set_message(f"Ran motors sequentially A → B → C → D where selected: {targets}")
+        else:
+            set_message(f"Ran motor: {targets}")
+
     except Exception as e:
         set_message(f"Error: {e}")
     return redirect(url_for("index"))
@@ -565,7 +582,8 @@ def run_all():
         level = validate_level(float(request.form.get("all_level", "0")))
         targets = {"A": level, "B": level, "C": level, "D": level}
         execute_targets(targets)
-        set_message(f"Ran ALL motors to {level} ft")
+        set_message(f"Ran ALL motors to {level} ft sequentially: A → B → C → D")
+
     except Exception as e:
         set_message(f"Error: {e}")
     return redirect(url_for("index"))
@@ -581,7 +599,12 @@ def run_command():
         command = request.form.get("command", "").strip()
         targets = parse_command(command)
         execute_targets(targets)
-        set_message(f"Ran command: {command}")
+
+        if len(targets) > 1:
+            set_message(f"Ran command sequentially: {command}")
+        else:
+            set_message(f"Ran command: {command}")
+
     except Exception as e:
         set_message(f"Error: {e}")
     return redirect(url_for("index"))
@@ -602,6 +625,7 @@ def save_form_config():
 
         save_named_config(config_name, targets)
         set_message(f"Saved configuration: config{config_name}")
+
     except Exception as e:
         set_message(f"Error: {e}")
     return redirect(url_for("index"))
@@ -618,8 +642,14 @@ def run_config():
         targets = get_named_config(config_name)
         if not targets:
             raise ValueError(f"No config named '{config_name}'")
+
         execute_targets(targets)
-        set_message(f"Ran configuration: config{config_name}")
+
+        if len(targets) > 1:
+            set_message(f"Ran configuration sequentially: config{config_name}")
+        else:
+            set_message(f"Ran configuration: config{config_name}")
+
     except Exception as e:
         set_message(f"Error: {e}")
     return redirect(url_for("index"))
@@ -631,6 +661,7 @@ def delete_config():
         config_name = request.form.get("config_name", "").strip().lower()
         delete_named_config(config_name)
         set_message(f"Deleted configuration: config{config_name}")
+
     except Exception as e:
         set_message(f"Error: {e}")
     return redirect(url_for("index"))
@@ -657,7 +688,7 @@ def unstandby():
 def zero_all():
     try:
         return_all_to_zero()
-        set_message("All motors returned to zero.")
+        set_message("All motors returned to zero sequentially: A → B → C → D")
     except Exception as e:
         set_message(f"Error: {e}")
     return redirect(url_for("index"))
